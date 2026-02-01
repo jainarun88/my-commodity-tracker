@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 # ---------------------------------------------------------
 st.set_page_config(page_title="Zerodha MCX Tracker", layout="wide", page_icon="📈")
 
-# Custom CSS
+# Custom CSS for Styling
 st.markdown("""
     <style>
     .big-font { font-size:20px !important; font-weight: bold; }
@@ -19,8 +19,9 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# ⚙️ CONTRACT DATABASE (Updated: Uses SPOT Price for Accuracy)
+# ⚙️ CONTRACT DATABASE (Updated to SPOT Prices)
 # ---------------------------------------------------------
+# Ticker changed to XAUUSD=X (Spot) to avoid Futures rollover glitches
 CONTRACTS = {
     "GOLDTEN (Standard)": {
         "ticker": "XAUUSD=X", "unit_mult": 10, "display_unit": "10 Grams", 
@@ -38,7 +39,6 @@ CONTRACTS = {
         "ticker": "XAUUSD=X", "unit_mult": 8, "display_unit": "8 Grams", 
         "lot_qty": 8, "margin_pct": 0.11, "type": "GOLD"
     },
-    # Silver ke liye bhi Spot use kar rahe hain taaki glitch na aaye
     "SILVER (Standard)": {
         "ticker": "XAGUSD=X", "unit_mult": 1000, "display_unit": "1 Kg", 
         "lot_qty": 30, "margin_pct": 0.13, "type": "SILVER"
@@ -54,54 +54,57 @@ CONTRACTS = {
 }
 
 # ---------------------------------------------------------
-# 🎛️ SIDEBAR
+# 🎛️ SIDEBAR SETTINGS
 # ---------------------------------------------------------
 st.sidebar.title("⚙️ Setup")
 selected_contract = st.sidebar.selectbox("Select Contract:", list(CONTRACTS.keys()))
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Timeframe")
-period = st.sidebar.select_slider("Data Period", options=['1mo', '3mo', '6mo', '1y'], value='6mo')
-interval = st.sidebar.selectbox("Interval", ['1d', '1wk'], index=0)
+period = st.sidebar.select_slider("Data Period", options=['1mo', '3mo', '6mo', '1y', '2y', '5y'], value='6mo')
+interval = st.sidebar.selectbox("Interval", ['1d', '1wk', '1mo'], index=0)
 
 config = CONTRACTS[selected_contract]
-TAX_FACTOR = 1.12 
+TAX_FACTOR = 1.12 # Import Duty + Premium
 
 # ---------------------------------------------------------
-# 🔄 DATA ENGINE
+# 🔄 ROBUST DATA ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def fetch_data(ticker, multiplier, p, i):
-    tickers = f"{ticker} INR=X"
-    data = yf.download(tickers, period=p, interval=i, progress=False)
-    
-    # Handle Multi-level columns if needed
-    if isinstance(data.columns, pd.MultiIndex):
-        try:
-            df_price = data['Close']
-            df_open = data['Open']
-            df_high = data['High']
-            df_low = data['Low']
-        except:
-            # Fallback for simple structure
-            df_price = data
-    else:
-        df_price = data['Close']
+    try:
+        # 1. Download separately to avoid index mismatch
+        df_asset = yf.download(ticker, period=p, interval=i, progress=False)
+        df_currency = yf.download("INR=X", period=p, interval=i, progress=False)
 
-    # Merge into clean DF
-    df = pd.DataFrame()
-    df['Global_Price'] = df_price[ticker]
-    df['USDINR'] = df_price['INR=X']
-    
-    # OHLC Data for Candlestick (Approx conversion)
-    # Note: We approximate OHLC based on Close conversion factor for simplicity
-    conv_factor = (df['USDINR'] / 31.1035) * multiplier * TAX_FACTOR
-    
-    df['Close'] = df['Global_Price'] * conv_factor
-    # For accurate candles, we ideally need OHLC of global, but this is a close approximation for visual trend
-    
-    df = df.ffill().dropna()
-    return df
+        # 2. Extract Close Prices safely (Handle MultiIndex)
+        if isinstance(df_asset.columns, pd.MultiIndex):
+            price_asset = df_asset['Close'][ticker] if ticker in df_asset.columns.get_level_values(1) else df_asset['Close'].iloc[:, 0]
+        else:
+            price_asset = df_asset['Close']
+
+        if isinstance(df_currency.columns, pd.MultiIndex):
+            price_currency = df_currency['Close']['INR=X'] if 'INR=X' in df_currency.columns.get_level_values(1) else df_currency['Close'].iloc[:, 0]
+        else:
+            price_currency = df_currency['Close']
+
+        # 3. Align Data using Concat (Fixes 'out-of-bounds' error)
+        df = pd.concat([price_asset, price_currency], axis=1)
+        df.columns = ['Global_Price', 'USDINR']
+        
+        # 4. Fill missing currency days (e.g., weekends/holidays)
+        df['USDINR'] = df['USDINR'].ffill()
+        df = df.dropna()
+
+        # 5. MCX Calculation
+        conv_factor = (df['USDINR'] / 31.1035) * multiplier * TAX_FACTOR
+        df['Close'] = df['Global_Price'] * conv_factor
+        
+        return df
+
+    except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
+        return pd.DataFrame()
 
 def add_technicals(df):
     price = df['Close']
@@ -117,13 +120,13 @@ def add_technicals(df):
     df['EMA_20'] = price.ewm(span=20).mean()
     df['EMA_50'] = price.ewm(span=50).mean()
 
-    # Bollinger
+    # Bollinger Bands
     df['SMA_20'] = price.rolling(20).mean()
     df['Std'] = price.rolling(20).std()
     df['Upper'] = df['SMA_20'] + (df['Std']*2)
     df['Lower'] = df['SMA_20'] - (df['Std']*2)
     
-    # Drawdown (Top se kitna gira)
+    # Drawdown
     df['Peak'] = price.cummax()
     df['Drawdown_Pct'] = ((price - df['Peak']) / df['Peak']) * 100
     
@@ -133,39 +136,21 @@ def add_technicals(df):
 # 🧠 MARGIN CALCULATOR
 # ---------------------------------------------------------
 def calculate_zerodha_margin(price_per_unit):
-    # Logic:
-    # 1. Total Contract Value = Price_Per_Gram * Total_Grams_In_Lot
-    # 2. Or Price_Per_Unit * Units_In_Lot
+    # Logic: Total Value = Price * Units in Lot
+    # Display Unit adjustment logic
     
-    # Adjust price to base unit (per gram or per kg)
-    # But easier: We know displayed price unit.
-    
-    # If Display is 10g, and Lot is 1000g (1kg). Factor = 100.
-    # If Display is 1kg, and Lot is 30kg. Factor = 30.
-    
-    display_unit_qty = 1 # default
+    display_unit_qty = 1 
     if "10 Grams" in config['display_unit']: display_unit_qty = 10
     elif "8 Grams" in config['display_unit']: display_unit_qty = 8
     elif "1 Gram" in config['display_unit']: display_unit_qty = 1
-    elif "1 Kg" in config['display_unit']: display_unit_qty = 1000 # converting to grams for base
+    elif "1 Kg" in config['display_unit']: display_unit_qty = 1000 
     
-    # Lot Quantity in grams (for Gold) or Kg (for Silver) needs aligning
-    # Let's simplify:
-    # Value = (Price / Display_Qty) * Lot_Qty_Actual_Units
-    
-    # Actually, simpler way:
-    # Price displayed is X.
-    # How many "Display Units" in 1 Lot?
-    
-    units_in_lot = 1
+    # Determine how many "Display Units" fit in 1 Lot
     if config['type'] == 'GOLD':
-        # Gold lot_qty is in grams
-        # Display unit is in grams (1, 8, 10)
         units_in_lot = config['lot_qty'] / display_unit_qty
     else:
-        # Silver lot_qty is in Kg
-        # Display unit is 1 Kg
-        units_in_lot = config['lot_qty'] # because display is 1kg
+        # For Silver, lot_qty is in Kg, Display is 1Kg. 1:1 ratio logic.
+        units_in_lot = config['lot_qty'] 
         
     total_contract_value = price_per_unit * units_in_lot
     margin_req = total_contract_value * config['margin_pct']
@@ -173,7 +158,7 @@ def calculate_zerodha_margin(price_per_unit):
     return total_contract_value, margin_req
 
 # ---------------------------------------------------------
-# 🖥️ MAIN UI
+# 🖥️ MAIN DASHBOARD UI
 # ---------------------------------------------------------
 st.title(f"📊 Zerodha {selected_contract} Analysis")
 
@@ -181,15 +166,21 @@ if st.sidebar.button('🔄 Refresh Data'):
     st.cache_data.clear()
 
 try:
-    with st.spinner('Calculating Margins & Charts...'):
+    with st.spinner('Fetching Live Data...'):
         df = fetch_data(config['ticker'], config['unit_mult'], period, interval)
+        
+        # --- CRITICAL CHECK: If data empty, stop here ---
+        if df.empty:
+            st.warning("⚠️ No Data Found. Market might be closed or Ticker issue. Try changing Period.")
+            st.stop()
+            
         df = add_technicals(df)
         
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         change = latest['Close'] - prev['Close']
         
-        # --- TOP METRICS ROW ---
+        # --- METRICS ROW ---
         col1, col2, col3, col4 = st.columns(4)
         
         # 1. Price
@@ -197,84 +188,77 @@ try:
             f"Price ({config['display_unit']})", 
             f"₹ {latest['Close']:,.0f}",
             f"{change:,.0f}", 
-            delta_color="inverse"
+            delta_color="inverse" # Green if drops (Buy opportunity)
         )
         
         # 2. RSI
         rsi_val = latest['RSI']
-        rsi_color = "red" if rsi_val > 70 else "green" if rsi_val < 30 else "off"
-        col2.metric("RSI (14)", f"{rsi_val:.1f}")
+        if pd.isna(rsi_val):
+            col2.metric("RSI (14)", "N/A")
+        else:
+            rsi_color = "red" if rsi_val > 70 else "green" if rsi_val < 30 else "off"
+            col2.metric("RSI (14)", f"{rsi_val:.1f}")
         
-        # 3. Zerodha Margin (The New Feature!)
+        # 3. Zerodha Margin
         contract_val, margin_val = calculate_zerodha_margin(latest['Close'])
         col3.metric(
             "Est. Margin (1 Lot)", 
             f"₹ {margin_val/100000:.2f} L",
-            help=f"Approx {config['margin_pct']*100}% of Value. Total Contract Value: ₹ {contract_val/100000:.2f} Lakhs"
+            help=f"Approx {config['margin_pct']*100}% Margin. Total Value: ₹ {contract_val/100000:.2f} L"
         )
         
-        # 4. Drawdown (Crash)
+        # 4. Drawdown
         dd = latest['Drawdown_Pct']
         col4.metric("Fall from Top", f"{dd:.2f}%", delta_color="off")
 
         st.markdown("---")
 
-        # --- TABS FOR CHARTS ---
-        tab1, tab2, tab3 = st.tabs(["🕯️ Candlestick & EMA", "📉 Drawdown Analysis", "📋 Contract Info"])
+        # --- CHARTS TABS ---
+        tab1, tab2, tab3 = st.tabs(["🕯️ Interactive Chart", "📉 Drawdown", "📋 Info"])
 
         with tab1:
-            # INTERACTIVE CANDLESTICK CHART
+            # PLOTLY CHART
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                                 vertical_spacing=0.1, row_heights=[0.7, 0.3])
 
-            # Candlestick
-            # Note: Using Close for Open/High/Low approximation for visual trend 
-            # (since we are converting USD to INR synthetically)
+            # Price Line (Simulated Candle using Line for clean look on calc data)
             fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', name='Price', line=dict(color='black')), row=1, col=1)
             
-            # EMA Lines
-            fig.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], name='EMA 20', line=dict(color='blue', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], name='EMA 50', line=dict(color='orange', width=1)), row=1, col=1)
+            # Indicators
+            if not df['EMA_20'].isnull().all():
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], name='EMA 20', line=dict(color='blue', width=1)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], name='EMA 50', line=dict(color='orange', width=1)), row=1, col=1)
             
             # Bollinger Bands
             fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], name='Upper BB', line=dict(color='green', dash='dot'), showlegend=False), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], name='Lower BB', line=dict(color='red', dash='dot'), showlegend=False), row=1, col=1)
 
-            # RSI Subplot
+            # RSI
             fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', line=dict(color='purple')), row=2, col=1)
             fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
             fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
 
-            fig.update_layout(height=600, title_text="Price Trend & Indicators (Interactive)", xaxis_rangeslider_visible=False)
+            fig.update_layout(height=600, title_text="Price Action & Indicators", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
         with tab2:
-            # DRAWDOWN CHART
-            st.subheader("⚠️ Crash Analysis")
-            st.write("This chart shows how much the price has fallen from its highest point in the selected period.")
-            
+            st.subheader("⚠️ Market Crash Monitor")
             fig_dd = go.Figure()
             fig_dd.add_trace(go.Scatter(x=df.index, y=df['Drawdown_Pct'], fill='tozeroy', line=dict(color='red'), name='Drawdown %'))
             fig_dd.update_layout(title="Percentage Fall from Peak", yaxis_title="Drawdown %", height=400)
             st.plotly_chart(fig_dd, use_container_width=True)
-            
-            if dd < -8:
-                st.markdown(f'<div class="loss-card">🚨 Current Drawdown is <b>{dd:.2f}%</b>. Historically, corrections >10% are good buying opportunities in Bull Runs.</div>', unsafe_allow_html=True)
 
         with tab3:
-            # CONTRACT DETAILS TABLE
-            st.subheader("Zerodha Contract Specs")
+            st.subheader("Contract Specifications")
             st.markdown(f"""
             | Detail | Value |
             | :--- | :--- |
             | **Contract** | {selected_contract} |
             | **Lot Size** | {config['lot_qty']} units |
             | **Display Unit** | {config['display_unit']} |
-            | **Approx Margin** | {config['margin_pct']*100}% |
-            | **Total Value (1 Lot)** | ₹ {contract_val:,.0f} |
+            | **Margin Req** | ~{config['margin_pct']*100}% |
+            | **Total Value** | ₹ {contract_val:,.0f} |
             """)
-            st.info("Note: Margin values are approximate based on standard exchange requirements. Actual margin may vary slightly on Zerodha Kite.")
 
 except Exception as e:
-    st.error(f"Error: {e}")
-
+    st.error(f"Application Error: {e}")
