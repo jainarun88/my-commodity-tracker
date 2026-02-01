@@ -134,11 +134,12 @@ try:
             prev = df.iloc[-2]
             change = latest['MCX_Price'] - prev['MCX_Price']
             
-            # 1. PRICE
+            # 1. PRICE DISPLAY (UPDATED LOGIC)
             st.metric(
                 label=f"Price (per {config['display_unit']})",
                 value=f"₹ {latest['MCX_Price']:,.0f}",
-                delta=f"₹ {change:,.0f}"
+                delta=f"{change:,.0f}",
+                delta_color="inverse"
             )
             
             # 2. METRICS
@@ -201,3 +202,4 @@ try:
 
 except Exception as e:
     st.error(f"Error: {e}")
+
