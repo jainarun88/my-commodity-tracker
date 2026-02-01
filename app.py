@@ -15,14 +15,12 @@ st.markdown("""
     .status-buy { color: #00C853; font-weight: 900; }
     .status-sell { color: #D50000; font-weight: 900; }
     .status-wait { color: #FF6D00; font-weight: 900; }
-    .contract-info { font-size: 14px; color: #555; background-color: #f0f2f6; padding: 10px; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# ⚙️ CONTRACT DETAILS DATABASE
+# ⚙️ CONTRACT DATABASE
 # ---------------------------------------------------------
-# Yahan humne har contract ki details define ki hain
 CONTRACTS = {
     "GOLD (Standard/10g)": {
         "ticker": "GC=F", "unit_mult": 10, "display_unit": "10 Grams", 
@@ -32,15 +30,11 @@ CONTRACTS = {
         "ticker": "GC=F", "unit_mult": 10, "display_unit": "10 Grams", 
         "lot_size": "100 Grams", "type": "GOLD"
     },
-    "GOLDGUINEA": {
-        "ticker": "GC=F", "unit_mult": 8, "display_unit": "8 Grams", 
-        "lot_size": "8 Grams", "type": "GOLD"
-    },
-    "GOLDPETAL": {
+    "GOLDPETAL (1g)": {
         "ticker": "GC=F", "unit_mult": 1, "display_unit": "1 Gram", 
         "lot_size": "1 Gram", "type": "GOLD"
     },
-    "SILVER (Standard)": {
+    "SILVER (Standard/1kg)": {
         "ticker": "SI=F", "unit_mult": 1000, "display_unit": "1 Kg", 
         "lot_size": "30 Kg", "type": "SILVER"
     },
@@ -59,56 +53,47 @@ CONTRACTS = {
 # ---------------------------------------------------------
 st.title("🏦 MCX Contract Tracker")
 
-# Dropdown for Selection
-selected_contract = st.selectbox(
-    "Select Contract:", 
-    list(CONTRACTS.keys())
-)
-
-# Get Details of Selected Contract
+selected_contract = st.selectbox("Select Contract:", list(CONTRACTS.keys()))
 config = CONTRACTS[selected_contract]
-TAX_FACTOR = 1.12 # 12% Import Duty + Premium estimate
+TAX_FACTOR = 1.12 
 
 # ---------------------------------------------------------
 # 🔄 DATA ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def fetch_data(ticker, multiplier):
-    # Download Global Price + USDINR
     tickers = f"{ticker} INR=X"
     data = yf.download(tickers, period="6mo", interval="1d", progress=False)
     
-    # Cleaning
     df = data['Close'].copy()
     df.columns = ['Global_Price', 'USDINR']
     df = df.ffill().dropna()
 
-    # MCX Calculation Formula:
-    # (Global Price / 31.1035) * Multiplier * Tax
-    # 31.1035 is conversion factor for Troy Ounce to Grams
-    troy_ounce_factor = 31.1035
-    
-    df['MCX_Price'] = (df['Global_Price'] * df['USDINR']) / troy_ounce_factor * multiplier * TAX_FACTOR
+    # MCX Formula
+    df['MCX_Price'] = (df['Global_Price'] * df['USDINR']) / 31.1035 * multiplier * TAX_FACTOR
     
     return df
 
 def add_indicators(df):
     price = df['MCX_Price']
     
-    # RSI
+    # 1. RSI (Improved Calculation for Accuracy)
     delta = price.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    # Use Exponential Moving Average (Wilder's Smoothing)
+    ema_up = up.ewm(com=13, adjust=False).mean()
+    ema_down = down.ewm(com=13, adjust=False).mean()
+    rs = ema_up / ema_down
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # Bollinger Bands
+    # 2. Bollinger Bands
     df['SMA_20'] = price.rolling(20).mean()
     df['Std'] = price.rolling(20).std()
     df['Upper'] = df['SMA_20'] + (df['Std']*2)
     df['Lower'] = df['SMA_20'] - (df['Std']*2)
 
-    # EMA & MACD
+    # 3. EMA & MACD
     df['EMA_50'] = price.ewm(span=50).mean()
     df['MACD'] = price.ewm(span=12).mean() - price.ewm(span=26).mean()
     df['Signal'] = df['MACD'].ewm(span=9).mean()
@@ -139,14 +124,10 @@ def get_signal(row):
 # 📱 APP UI
 # ---------------------------------------------------------
 try:
-    # Display Contract Info
-    st.info(f"""
-    **Contract Details:** {selected_contract}
-    • **Price Unit:** Per {config['display_unit']} (Displayed below)
-    • **Lot Size:** {config['lot_size']}
-    """)
+    if st.button('🔄 Refresh Data'):
+        st.cache_data.clear()
 
-    with st.spinner(f'Fetching data for {selected_contract}...'):
+    with st.spinner(f'Analyzing {selected_contract}...'):
         df = fetch_data(config['ticker'], config['unit_mult'])
         df = add_indicators(df)
         
@@ -154,14 +135,34 @@ try:
         prev = df.iloc[-2]
         change = latest['MCX_Price'] - prev['MCX_Price']
         
-        # --- PRICE HEADER ---
+        # 1. PRICE DISPLAY
         st.metric(
             label=f"Price (per {config['display_unit']})",
             value=f"₹ {latest['MCX_Price']:,.0f}",
             delta=f"₹ {change:,.0f}"
         )
         
-        # --- AI SIGNAL ---
+        # 2. TECHNICAL METRICS (Yeh Missing tha!)
+        st.write("---")
+        c1, c2, c3 = st.columns(3)
+        
+        # RSI Display
+        rsi_val = latest['RSI']
+        rsi_color = "red" if rsi_val > 70 else "green" if rsi_val < 30 else "orange"
+        c1.markdown(f"**RSI (14)**")
+        c1.markdown(f":{rsi_color}[{rsi_val:.1f}]")
+        
+        # Trend Display
+        trend = "BULLISH 📈" if latest['MCX_Price'] > latest['EMA_50'] else "BEARISH 📉"
+        c2.markdown("**Trend**")
+        c2.markdown(trend)
+        
+        # MACD Display
+        macd_stat = "POS 🟢" if latest['MACD'] > latest['Signal'] else "NEG 🔴"
+        c3.markdown("**MACD**")
+        c3.markdown(macd_stat)
+
+        # 3. AI SIGNAL
         st.write("---")
         st.subheader("🤖 AI Signal")
         verdict, color_class, reasons = get_signal(latest)
@@ -169,9 +170,9 @@ try:
         for r in reasons:
             st.caption(f"• {r}")
             
-        # --- CHART ---
+        # 4. CHART
         st.write("---")
-        st.subheader("📉 Price Trend")
+        st.subheader("📉 Chart")
         
         fig, ax1 = plt.subplots(figsize=(8, 4))
         ax1.plot(df.index, df['MCX_Price'], label='Price', color='black')
@@ -179,13 +180,13 @@ try:
         ax1.plot(df.index, df['Lower'], color='red', linestyle='--', alpha=0.3)
         ax1.plot(df.index, df['EMA_50'], color='orange', label='EMA 50')
         ax1.legend(loc='upper left', fontsize='small')
-        ax1.set_title(f"{selected_contract} Price vs Bands")
+        ax1.set_title(f"{selected_contract} Trend")
         ax1.grid(alpha=0.3)
         st.pyplot(fig)
 
-        # Raw Data Option
-        with st.expander("📊 View Raw Data"):
-            st.dataframe(df.tail(10)[['MCX_Price', 'RSI', 'USDINR']])
+        # Raw Data
+        with st.expander("📊 View Data"):
+            st.dataframe(df.tail(5)[['MCX_Price', 'RSI', 'USDINR']])
 
 except Exception as e:
     st.error(f"Error: {e}")
