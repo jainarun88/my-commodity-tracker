@@ -19,38 +19,37 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# ⚙️ CONTRACT DATABASE (Zerodha Specs)
+# ⚙️ CONTRACT DATABASE (Updated: Uses SPOT Price for Accuracy)
 # ---------------------------------------------------------
-# Note: Margins are approx estimates (SPAN + Exposure)
-# Gold ~10-12%, Silver ~12-15% of Contract Value
 CONTRACTS = {
     "GOLDTEN (Standard)": {
-        "ticker": "GC=F", "unit_mult": 10, "display_unit": "10 Grams", 
-        "lot_qty": 1000, "margin_pct": 0.11, "type": "GOLD" # Lot = 1 Kg (1000g)
+        "ticker": "XAUUSD=X", "unit_mult": 10, "display_unit": "10 Grams", 
+        "lot_qty": 1000, "margin_pct": 0.11, "type": "GOLD"
     },
     "GOLDM (Mini)": {
-        "ticker": "GC=F", "unit_mult": 10, "display_unit": "10 Grams", 
-        "lot_qty": 100, "margin_pct": 0.11, "type": "GOLD" # Lot = 100g
+        "ticker": "XAUUSD=X", "unit_mult": 10, "display_unit": "10 Grams", 
+        "lot_qty": 100, "margin_pct": 0.11, "type": "GOLD"
     },
     "GOLDPETAL (1g)": {
-        "ticker": "GC=F", "unit_mult": 1, "display_unit": "1 Gram", 
-        "lot_qty": 1, "margin_pct": 0.11, "type": "GOLD" # Lot = 1g
+        "ticker": "XAUUSD=X", "unit_mult": 1, "display_unit": "1 Gram", 
+        "lot_qty": 1, "margin_pct": 0.11, "type": "GOLD"
     },
     "GOLDGUINEA (8g)": {
-        "ticker": "GC=F", "unit_mult": 8, "display_unit": "8 Grams", 
-        "lot_qty": 8, "margin_pct": 0.11, "type": "GOLD" # Lot = 8g
+        "ticker": "XAUUSD=X", "unit_mult": 8, "display_unit": "8 Grams", 
+        "lot_qty": 8, "margin_pct": 0.11, "type": "GOLD"
     },
+    # Silver ke liye bhi Spot use kar rahe hain taaki glitch na aaye
     "SILVER (Standard)": {
-        "ticker": "SI=F", "unit_mult": 1000, "display_unit": "1 Kg", 
-        "lot_qty": 30, "margin_pct": 0.13, "type": "SILVER" # Lot = 30 Kg
+        "ticker": "XAGUSD=X", "unit_mult": 1000, "display_unit": "1 Kg", 
+        "lot_qty": 30, "margin_pct": 0.13, "type": "SILVER"
     },
     "SILVERM (Mini)": {
-        "ticker": "SI=F", "unit_mult": 1000, "display_unit": "1 Kg", 
-        "lot_qty": 5, "margin_pct": 0.13, "type": "SILVER" # Lot = 5 Kg
+        "ticker": "XAGUSD=X", "unit_mult": 1000, "display_unit": "1 Kg", 
+        "lot_qty": 5, "margin_pct": 0.13, "type": "SILVER"
     },
     "SILVERMIC (Micro)": {
-        "ticker": "SI=F", "unit_mult": 1000, "display_unit": "1 Kg", 
-        "lot_qty": 1, "margin_pct": 0.13, "type": "SILVER" # Lot = 1 Kg
+        "ticker": "XAGUSD=X", "unit_mult": 1000, "display_unit": "1 Kg", 
+        "lot_qty": 1, "margin_pct": 0.13, "type": "SILVER"
     }
 }
 
@@ -278,3 +277,4 @@ try:
 
 except Exception as e:
     st.error(f"Error: {e}")
+
