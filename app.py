@@ -68,35 +68,55 @@ config = CONTRACTS[selected_contract]
 TAX_FACTOR = 1.12 # Import Duty + Premium
 
 # ---------------------------------------------------------
-# 🔄 ROBUST DATA ENGINE
+# 🔄 BULLETPROOF DATA ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def fetch_data(ticker, multiplier, p, i):
     try:
-        # 1. Download separately to avoid index mismatch
+        # 1. Primary Download (Spot Price)
         df_asset = yf.download(ticker, period=p, interval=i, progress=False)
+        
+        # Fallback: Agar Spot Price khali aaye, to Futures try karein
+        if df_asset.empty:
+            fallback_ticker = "GC=F" if "XAU" in ticker else "SI=F"
+            # st.toast(f"⚠️ Spot data failed. Switching to Futures ({fallback_ticker})...") 
+            df_asset = yf.download(fallback_ticker, period=p, interval=i, progress=False)
+            
         df_currency = yf.download("INR=X", period=p, interval=i, progress=False)
 
-        # 2. Extract Close Prices safely (Handle MultiIndex)
-        if isinstance(df_asset.columns, pd.MultiIndex):
-            price_asset = df_asset['Close'][ticker] if ticker in df_asset.columns.get_level_values(1) else df_asset['Close'].iloc[:, 0]
-        else:
-            price_asset = df_asset['Close']
+        # 2. Check Valid Data
+        if df_asset.empty or df_currency.empty:
+            return pd.DataFrame()
 
-        if isinstance(df_currency.columns, pd.MultiIndex):
-            price_currency = df_currency['Close']['INR=X'] if 'INR=X' in df_currency.columns.get_level_values(1) else df_currency['Close'].iloc[:, 0]
-        else:
-            price_currency = df_currency['Close']
+        # 3. Extract Close Prices (Handle MultiIndex Safely)
+        def get_close(df, symbol):
+            if isinstance(df.columns, pd.MultiIndex):
+                # Try finding symbol in level 1
+                if symbol in df.columns.get_level_values(1):
+                    return df['Close'][symbol]
+                else:
+                    return df['Close'].iloc[:, 0] # First column fallback
+            return df['Close']
 
-        # 3. Align Data using Concat (Fixes 'out-of-bounds' error)
+        price_asset = get_close(df_asset, ticker)
+        price_currency = get_close(df_currency, "INR=X")
+
+        # 4. TIMEZONE FIX (Sabse Important Step) 🕒
+        # Dono ke timezone hata kar plain date banate hain taaki match ho sakein
+        if price_asset.index.tz is not None:
+            price_asset.index = price_asset.index.tz_localize(None)
+        if price_currency.index.tz is not None:
+            price_currency.index = price_currency.index.tz_localize(None)
+
+        # 5. Align Data
         df = pd.concat([price_asset, price_currency], axis=1)
         df.columns = ['Global_Price', 'USDINR']
         
-        # 4. Fill missing currency days (e.g., weekends/holidays)
-        df['USDINR'] = df['USDINR'].ffill()
-        df = df.dropna()
+        # 6. Smart Filling (Weekend/Holiday Handling)
+        df = df.ffill()  # Pehle pichla rate aage copy karo (Friday ka rate Saturday/Sunday ke liye)
+        df = df.dropna() # Ab jo sach mein khali hai use hatao
 
-        # 5. MCX Calculation
+        # 7. Calculation
         conv_factor = (df['USDINR'] / 31.1035) * multiplier * TAX_FACTOR
         df['Close'] = df['Global_Price'] * conv_factor
         
@@ -262,3 +282,4 @@ try:
 
 except Exception as e:
     st.error(f"Application Error: {e}")
+
